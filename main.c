@@ -8,6 +8,7 @@
 #include <sys/wait.h>
 #include <errno.h>
 #include <ctype.h>
+#include <time.h>
 
 #define MAX_THREADS 4
 #define MAX_WORD_LEN 128
@@ -103,8 +104,8 @@ void *count_words(void *arg) {
     return NULL;
 }
 
-// Function to process file in a separate process
-void process_file(const char *filename, int pipe_out_fd) {
+// Function to process file using multithreading (for comparison)
+void process_file_multithreading(const char *filename) {
     FILE *file = fopen(filename, "r");
     if (file == NULL) {
         perror("Error opening file");
@@ -121,7 +122,55 @@ void process_file(const char *filename, int pipe_out_fd) {
     buffer[file_size] = '\0';
     fclose(file);
 
+    // Start timing for multithreading
+    clock_t start_multithreading = clock();
+
     // Multithreading part
+    int chunk_size = file_size / MAX_THREADS;
+    pthread_t threads[MAX_THREADS];
+    ThreadData thread_data[MAX_THREADS];
+
+    // Ensure that no word is cut between chunks
+    for (int i = 0; i < MAX_THREADS; i++) {
+        thread_data[i].text_chunk = buffer + i * chunk_size;
+        thread_data[i].chunk_size = (i == MAX_THREADS - 1) ? (file_size - i * chunk_size) : chunk_size;
+        thread_data[i].mutex = &global_mutex;
+        pthread_create(&threads[i], NULL, count_words, &thread_data[i]);
+    }
+
+    // Wait for all threads to complete
+    for (int i = 0; i < MAX_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+    // Stop timing for multithreading
+    clock_t end_multithreading = clock();
+    double time_multithreading = ((double)(end_multithreading - start_multithreading)) / CLOCKS_PER_SEC;
+
+    printf("\nTime taken for multithreading: %f seconds\n", time_multithreading);
+
+    free(buffer);
+}
+
+// Function to process file in a separate process (for multiprocessing)
+void process_file_multiprocessing(const char *filename, int pipe_out_fd) {
+    FILE *file = fopen(filename, "r");
+    if (file == NULL) {
+        perror("Error opening file");
+        exit(EXIT_FAILURE);
+    }
+
+    // Read the entire file into a buffer
+    fseek(file, 0, SEEK_END);
+    long file_size = ftell(file);
+    rewind(file);
+
+    char *buffer = malloc(file_size + 1);
+    fread(buffer, 1, file_size, file);
+    buffer[file_size] = '\0';
+    fclose(file);
+
+    // Multithreading part (for multiprocessing comparison)
     int chunk_size = file_size / MAX_THREADS;
     pthread_t threads[MAX_THREADS];
     ThreadData thread_data[MAX_THREADS];
@@ -165,12 +214,29 @@ void update_word_count_in_parent(char *word, int freq) {
     pthread_mutex_unlock(&global_mutex);
 }
 
-// Main function to fork processes for each file
+// Main function to fork processes for each file (multiprocessing)
 int main(int argc, char *argv[]) {
     // List of files to process
     const char *files[] = {"bib", "paper1", "paper2", "progc", "progl", "progp", "trans"};
     int num_files = sizeof(files) / sizeof(files[0]);
     int pipes[num_files][2];
+
+    // Time for multithreading
+    double total_time_multithreading = 0.0;
+    printf("\nStarting multithreading...\n");
+    for (int i = 0; i < num_files; i++) {
+        char file_path[256];
+        sprintf(file_path, "./%s", files[i]);  // Assuming files are in the current directory
+        process_file_multithreading(file_path);  // Process each file using multithreading
+        clock_t start_multithreading = clock();
+        process_file_multithreading(file_path);
+        clock_t end_multithreading = clock();
+        total_time_multithreading += ((double)(end_multithreading - start_multithreading)) / CLOCKS_PER_SEC;
+    }
+
+    // Start timing for multiprocessing
+    printf("\nStarting multiprocessing...\n");
+    clock_t start_multiprocessing = clock();
 
     // Fork a process for each file
     for (int i = 0; i < num_files; i++) {
@@ -187,7 +253,7 @@ int main(int argc, char *argv[]) {
             close(pipes[i][0]);  // Close read end
             char file_path[256];
             sprintf(file_path, "./%s", files[i]);  // Assuming files are in the current directory
-            process_file(file_path, pipes[i][1]);
+            process_file_multiprocessing(file_path, pipes[i][1]);
             exit(EXIT_SUCCESS);
         } else {
             close(pipes[i][1]);  // Parent closes write end
@@ -206,6 +272,10 @@ int main(int argc, char *argv[]) {
         wait(NULL);  // Wait for child process to finish
     }
 
+    // Stop timing for multiprocessing
+    clock_t end_multiprocessing = clock();
+    double total_time_multiprocessing = ((double)(end_multiprocessing - start_multiprocessing)) / CLOCKS_PER_SEC;
+
     // Sort the words based on frequency (descending order)
     for (int i = 0; i < word_count - 1; i++) {
         for (int j = i + 1; j < word_count; j++) {
@@ -223,11 +293,26 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Print the top 50 words globally
+    // Open a file to save the top 50 words and their frequencies
+    FILE *output_file = fopen("top_values", "w");
+    if (output_file == NULL) {
+        perror("Error opening file to write top values");
+        exit(EXIT_FAILURE);
+    }
+
+    // Print the top 50 words globally and save to the file
     printf("Top 50 words:\n");
     for (int i = 0; i < 50 && i < word_count; i++) {
         printf("%s: %d\n", words[i], word_freq[i]);
+        fprintf(output_file, "%s %d\n", words[i], word_freq[i]);  // Save to file
     }
+
+    // Close the file
+    fclose(output_file);
+
+    // Print the time comparison between multithreading and multiprocessing
+    printf("\nTotal time taken for multithreading: %f seconds\n", total_time_multithreading);
+    printf("Total time taken for multiprocessing: %f seconds\n", total_time_multiprocessing);
 
     return 0;
 }
